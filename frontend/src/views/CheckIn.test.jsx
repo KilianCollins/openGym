@@ -372,7 +372,7 @@ describe('CheckIn — adding a card', () => {
     mocks.scanCode.mockResolvedValue({ value: '5901234123457', fmt: 'EAN_13' })
     await openAdd()
     await tap(sheetBtn('Scan'))
-    expect(mocks.toast).toHaveBeenCalledWith("That's not a QR code. Only QR cards can be shown here")
+    expect(mocks.toast).toHaveBeenCalledWith('Not a QR code. Use Import photo to save a picture of it instead')
     expect(sheetBtn('Save card').disabled).toBe(true)
     expect(sheetHost.querySelector('[data-qr]')).toBeFalsy()
   })
@@ -427,7 +427,7 @@ describe('CheckIn — adding a card', () => {
     act(() => { camRoot.render(mocks.sheets.at(-1)(closeCam)) })
     await act(async () => { mocks.camera.onFound({ value: '5901234123457', fmt: 'EAN_13' }) })
     expect(closeCam).toHaveBeenCalledTimes(1)
-    expect(mocks.toast).toHaveBeenCalledWith("That's not a QR code. Only QR cards can be shown here")
+    expect(mocks.toast).toHaveBeenCalledWith('Not a QR code. Use Import photo to save a picture of it instead')
     expect(sheetBtn('Save card').disabled).toBe(true)
   })
 })
@@ -439,7 +439,7 @@ describe('CheckIn — importing a photo', () => {
     Object.defineProperty(input, 'files', { configurable: true, value: [file] })
     await act(async () => {
       input.dispatchEvent(new Event('change', { bubbles: true }))
-      await new Promise(r => setTimeout(r, 0))
+      await new Promise(r => setTimeout(r, 20))
     })
     return file
   }
@@ -476,19 +476,33 @@ describe('CheckIn — importing a photo', () => {
     expect(sheetBtn('Import photo').disabled).toBe(false)
   })
 
-  it('a photo with nothing in it says so and leaves the form empty', async () => {
+  it('a photo with no readable code is kept as the card photo', async () => {
     mocks.importCodeFromImage.mockResolvedValue(null)
     await openAdd()
     await pickFile()
-    expect(mocks.toast).toHaveBeenCalledWith('No QR code found in that image')
-    expect(sheetBtn('Save card').disabled).toBe(true)
+    expect(mocks.toast).toHaveBeenCalledWith('Saved as a photo of your card')
+    expect(sheetHost.querySelector('img').getAttribute('src')).toMatch(/^data:image\/jpeg;base64,/)
+    await tap(sheetBtn('Save card'))
+    expect(mocks.S.gymCards[0]).toMatchObject({ value: '', fmt: 'photo' })
+    expect(mocks.S.gymCards[0].img).toMatch(/^data:image\/jpeg;base64,/)
   })
 
-  it('a photo of a non-QR barcode is refused for the same reason a scan of one is', async () => {
+  it('a photo of a non-QR barcode is saved as a photo, keeping the number it read', async () => {
     mocks.importCodeFromImage.mockResolvedValue({ value: '5901234123457', fmt: 'CODE_128' })
     await openAdd()
     await pickFile()
-    expect(mocks.toast).toHaveBeenCalledWith("That's not a QR code. Only QR cards can be shown here")
+    expect(sheetHost.querySelector('[data-qr]')).toBeFalsy()
+    await tap(sheetBtn('Save card'))
+    expect(mocks.S.gymCards[0]).toMatchObject({ value: '5901234123457', fmt: 'photo' })
+  })
+
+  it('a photo too large to sync is refused', async () => {
+    mocks.importCodeFromImage.mockResolvedValue(null)
+    await openAdd()
+    const input = fileInput()
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File([new Uint8Array(600 * 1024)], 'big.jpg', { type: 'image/jpeg' })] })
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })); await new Promise(r => setTimeout(r, 0)) })
+    expect(mocks.toast).toHaveBeenCalledWith('That photo is too large. Crop it close to the code and try again')
     expect(sheetBtn('Save card').disabled).toBe(true)
   })
 

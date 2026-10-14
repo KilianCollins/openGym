@@ -126,14 +126,32 @@ function CardFace({ card, index, count }) {
       <div className="ci-label">{card.label}</div>
       <button className="iconbtn ci-card-btn" style={{ color: 'var(--red)' }} onClick={remove} aria-label={t('Remove')}><Icon name="trash" /></button>
     </div>
-    <div className="ci-qr-plate"><QrCanvas value={card.value} size={230} /></div>
-    <div className="ci-value">{card.value}</div>
+    <div className="ci-qr-plate"><CardCode card={card} size={230} /></div>
+    {card.value && <div className="ci-value">{card.value}</div>}
     {count > 1 && <div className="ci-reorder">
       <button className="iconbtn ci-card-btn" onClick={() => move(index - 1)} disabled={index === 0} aria-label={t('Move left')}><Icon name="chevronLeft" /></button>
       <span className="ci-pos">{index + 1} / {count}</span>
       <button className="iconbtn ci-card-btn" onClick={() => move(index + 1)} disabled={index === count - 1} aria-label={t('Move right')}><Icon name="chevronRight" /></button>
     </div>}
   </div>
+}
+
+// A card's code: the stored photo when it has one (a barcode we can't redraw), else the QR.
+function CardCode({ card, size }) {
+  if (card.img) return <img src={card.img} alt={card.label || ''} style={{ display: 'block', maxWidth: size + 60, maxHeight: size, width: '100%', objectFit: 'contain' }} />
+  return <QrCanvas value={card.value} size={size} />
+}
+
+// ponytail: stores the photo as-is, capped at 500 KB so state stays well under the 5 MB sync
+// limit; add canvas downscaling if people hit the cap with uncropped photos.
+const MAX_CARD_IMG = 500 * 1024
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result))
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(file)
+  })
 }
 
 /* ------------------------------------------------------------- add/edit sheet -- */
@@ -156,13 +174,16 @@ function CardSheet({ close, card }) {
   const editing = !!card
   const [label, setLabel] = useState(card?.label || '')
   const [value, setValue] = useState(card?.value || '')
+  const [img, setImg] = useState(card?.img || '')
   const [busy, setBusy] = useState(false)
+  const ready = !!(value.trim() || img)
   const fileRef = useRef(null)
   const toast = useUI(s => s.toast)
 
   const commit = () => {
     const trimmed = value.trim()
-    if (!trimmed) { toast(t('Scan or import a code first')); return }
+    if (!ready) { toast(t('Scan or import a code first')); return }
+    const fmt = img ? 'photo' : 'qrcode'
     const update = useStore.getState().update
     if (editing) {
       // The card can be removed on another device while this sheet is open. Checking inside the
@@ -178,13 +199,15 @@ function CardSheet({ close, card }) {
         if (!c) return
         c.label = label.trim() || t('Gym card')
         c.value = trimmed
+        c.fmt = fmt
+        if (img) c.img = img; else delete c.img
       })
       toast(t('Card updated'))
     } else {
       update(s => {
         if (!Array.isArray(s.gymCards)) s.gymCards = []
         const id = uid()
-        s.gymCards.push({ id, label: label.trim() || t('Gym card'), value: trimmed, fmt: 'qrcode' })
+        s.gymCards.push({ id, label: label.trim() || t('Gym card'), value: trimmed, fmt, ...(img ? { img } : {}) })
         s.lastGymCardId = id
       })
       toast(t('Card added'))
@@ -201,8 +224,8 @@ function CardSheet({ close, card }) {
         onCancel={closeCam}
         onFound={code => {
           closeCam()
-          if (!canRenderFmt(code.fmt)) { toast(t("That's not a QR code. Only QR cards can be shown here")); return }
-          setValue(code.value)
+          if (!canRenderFmt(code.fmt)) { toast(t('Not a QR code. Use Import photo to save a picture of it instead')); return }
+          setValue(code.value); setImg('')
         }} />)
       return
     }
@@ -210,8 +233,8 @@ function CardSheet({ close, card }) {
     try {
       const code = await scanCode()
       if (!code) return                       // user backed out
-      if (!canRenderFmt(code.fmt)) { toast(t("That's not a QR code. Only QR cards can be shown here")); return }
-      setValue(code.value)
+      if (!canRenderFmt(code.fmt)) { toast(t('Not a QR code. Use Import photo to save a picture of it instead')); return }
+      setValue(code.value); setImg('')
     } catch (e) {
       toast(scanErrorMessage(e))
     } finally { setBusy(false) }
@@ -224,9 +247,12 @@ function CardSheet({ close, card }) {
     setBusy(true)
     try {
       const code = await importCodeFromImage(file)
-      if (!code) { toast(t('No QR code found in that image')); return }
-      if (!canRenderFmt(code.fmt)) { toast(t("That's not a QR code. Only QR cards can be shown here")); return }
-      setValue(code.value)
+      if (code && canRenderFmt(code.fmt)) { setValue(code.value); setImg(''); return }
+      // Not a QR (or nothing readable): keep the photo itself and show that at the turnstile.
+      if (file.size > MAX_CARD_IMG) { toast(t('That photo is too large. Crop it close to the code and try again')); return }
+      setImg(await readAsDataUrl(file))
+      setValue(code?.value || '')
+      toast(t('Saved as a photo of your card'))
     } catch (e) {
       toast(t('Could not read that image'))
     } finally { setBusy(false) }
@@ -244,9 +270,9 @@ function CardSheet({ close, card }) {
     <label className="sect-t">{t('Label')}</label>
     <TextField value={label} onChange={e => setLabel(e.target.value)} placeholder={t('e.g. FitZone downtown')} style={{ marginBottom: 16 }} />
 
-    {value.trim() && <div className="ci-qr-plate" style={{ alignSelf: 'center', marginBottom: 16 }}><QrCanvas value={value.trim()} size={150} /></div>}
+    {ready && <div className="ci-qr-plate" style={{ alignSelf: 'center', marginBottom: 16 }}><CardCode card={{ img, value: value.trim(), label }} size={150} /></div>}
 
-    <Button variant="primary" onClick={commit} disabled={busy || !value.trim()}>{editing ? t('Save card') : t('Save card')}</Button>
+    <Button variant="primary" onClick={commit} disabled={busy || !ready}>{editing ? t('Save card') : t('Save card')}</Button>
 
     <input ref={fileRef} type="file" accept="image/*" hidden onChange={onFile} />
   </>
